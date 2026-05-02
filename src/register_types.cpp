@@ -6,6 +6,7 @@
 #include <godot_cpp/godot.hpp>
 
 #include "gdlua_class.h"
+#include "gdlua_deferred_class.h"
 
 using namespace godot;
 
@@ -15,6 +16,7 @@ void initialize_gdextension_types(ModuleInitializationLevel p_level)
 		return;
 	}
 	GDREGISTER_CLASS(GDLua);
+	GDREGISTER_CLASS(GDLuaDeferred);
 }
 
 void uninitialize_gdextension_types(ModuleInitializationLevel p_level) {

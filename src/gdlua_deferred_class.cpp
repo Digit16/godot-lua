@@ -1,0 +1,1 @@
+#include "gdlua_deferred_class.h"

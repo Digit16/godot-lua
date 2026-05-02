@@ -6,9 +6,9 @@
 #include "godot_cpp/core/print_string.hpp"
 
 void GDLua::_bind_methods() {
-    godot::ClassDB::bind_method(D_METHOD("register_callable", "name", "callable"), &GDLua::register_function);
+    godot::ClassDB::bind_method(D_METHOD("register_function", "name", "callable"), &GDLua::register_function);
 
-	godot::ClassDB::bind_method(D_METHOD("compile_and_run", "code"), &GDLua::immediate);
+	godot::ClassDB::bind_method(D_METHOD("execute", "code"), &GDLua::execute);
     godot::ClassDB::bind_method(D_METHOD("is_valid"), &GDLua::is_valid);
     godot::ClassDB::bind_method(D_METHOD("is_running"), &GDLua::is_running);
 
@@ -33,8 +33,38 @@ GDLua::~GDLua() {
     close();
 }
 
+void GDLua::_resume_coroutine(Variant value) {
+    print_line("resuming");
+    _waiting = false;
+    _pending_resume = true;
+    _pending_value = value;
+}
+
+int lua_push_godot_variant(lua_State *L, Variant val) {
+    print_line("pushing godot value");
+    printf("processing type %s\n", Variant::get_type_name(val.get_type()).utf8().get_data());
+    switch (val.get_type()) {
+    case Variant::INT:    lua_pushinteger(L, (lua_Integer)val);print_line("INT");             return 1;
+    case Variant::FLOAT:  lua_pushnumber(L, (lua_Number)val);print_line("FLOAT");                return 1;
+    case Variant::STRING: lua_pushstring(L, String(val).utf8().get_data()); return 1;
+    case Variant::BOOL:   lua_pushboolean(L, (bool)val);                    return 1;
+    case Variant::NIL:    return 0;
+    default:
+        if (val.get_type() == Variant::OBJECT) {
+            godot::Object* obj = val;
+            return luaL_error(L, "unsupported return type 'Object' (class: '%s')",
+                obj->get_class().utf8().get_data());
+        }
+        return luaL_error(L, "unsupported return type '%s'",
+            Variant::get_type_name(val.get_type()).utf8().get_data());
+    }
+}
+
+
 int lua_callable_dispatch(lua_State *L) {
-    Callable *cb = static_cast<Callable *>(lua_touserdata(L, lua_upvalueindex(1)));
+    print_line("dispatch");
+    Callable *cb  = (Callable *)lua_touserdata(L, lua_upvalueindex(1));
+    GDLua *self = (GDLua *)lua_touserdata(L, lua_upvalueindex(2));
 
     if (!cb || !cb->is_valid()) {
         return luaL_error(L, "callable is invalid or has been freed");
@@ -55,6 +85,8 @@ int lua_callable_dispatch(lua_State *L) {
             godot_args.push_back(String(lua_tostring(L, i)));
         } else if (lua_isboolean(L, i)) {
             godot_args.push_back((bool)lua_toboolean(L, i));
+        } else if (lua_isnil(L, i)) {
+            godot_args.push_back(Variant());
         } else {
             return luaL_error(L, "unsupported argument type '%s' at index %d",
                 luaL_typename(L, i), i);
@@ -63,27 +95,40 @@ int lua_callable_dispatch(lua_State *L) {
 
     Variant ret = cb->callv(godot_args);
 
-    switch (ret.get_type()) {
-        case Variant::INT:    lua_pushinteger(L, (lua_Integer)ret);             return 1;
-        case Variant::FLOAT:  lua_pushnumber(L, (lua_Number)ret);               return 1;
-        case Variant::STRING: lua_pushstring(L, String(ret).utf8().get_data()); return 1;
-        case Variant::BOOL:   lua_pushboolean(L, (bool)ret);                    return 1;
-        case Variant::NIL:    return 0;
-        default:
-            return luaL_error(L, "unsupported return type '%s'",
-                Variant::get_type_name(ret.get_type()).utf8().get_data());
+    if (ret.get_type() == Variant::OBJECT) {
+        print_line("detected object");
+        godot::Object* obj = ret;
+        if (obj->has_signal("completed")) {
+            print_line("detected completed");
+            obj->connect("completed", callable_mp(self, &GDLua::_resume_coroutine));
+            self->_waiting = true;
+            return lua_yield(L, 0);
+            ERR_FAIL_COND_V_MSG(!self->_pending_resume, 0, "pending value expected");
+            self->_pending_resume = false;
+            ret = self->_pending_value;
+            print_line("after yield");
+        }
     }
+
+    return lua_push_godot_variant(L, ret);
 }
+
+int resume_wrapper(lua_State *L) {
+    Variant *var = (Variant *)lua_touserdata(L, lua_upvalueindex(1));
+    return lua_push_godot_variant(L, *var);
+}
+
 
 void GDLua::register_function(String name, Callable cb) {
     Callable *stored = memnew(Callable(cb));
     lua_pushlightuserdata(L, stored);
-    lua_pushcclosure(L, lua_callable_dispatch, 1);
+    lua_pushlightuserdata(L, this);
+    lua_pushcclosure(L, lua_callable_dispatch, 2);
     lua_setglobal(L, name.utf8().get_data());
 }
 
 /* Create method that runs given string as lua code */
-bool GDLua::immediate(const String &p_code) {
+bool GDLua::execute(const String &p_code) {
     if (!compile(p_code)) return false;
     if (!run()) return false;
     return true;
@@ -162,6 +207,7 @@ bool GDLua::compile(const String &p_code) {
 bool GDLua::step(int steps, bool line) {
     /* skip if not running */
     if (!_running) return true;
+    if (_waiting) return true;
 
     /* throw error if no thread exists */
     ERR_FAIL_COND_V_MSG(L_co == nullptr, false, "Lua uninitialized state is in running state");
@@ -173,8 +219,27 @@ bool GDLua::step(int steps, bool line) {
     lua_sethook(L_co, yield_hook, mask, steps);
 
     /* run until hook or yield */
+    int argc = 0;
+    if (_pending_resume) {
+        print_line("resume pending on step");
+        _pending_resume = false;
+
+        // TODO: create error manually, remove clousure
+        lua_pushlightuserdata(L_co, &_pending_value);
+        lua_pushcclosure(L_co, resume_wrapper, 1);
+        
+        if (lua_pcall(L_co, 0, 1, 0) != LUA_OK) {
+            luaL_where(L_co, 1);
+            lua_pushvalue(L_co, -2);  // copy error message
+            lua_concat(L_co, 2);      // combine location + message
+            save_lua_error(L_co);
+            _running = false;
+            return false;
+        }
+        argc = 1;
+    }
     int nresults = 0;
-    int status = lua_resume(L_co, NULL, 0, &nresults);
+    int status = lua_resume(L_co, NULL, argc, &nresults);
 
     /* check run status */
     if (status == LUA_YIELD) {

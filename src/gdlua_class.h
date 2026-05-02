@@ -14,6 +14,7 @@ extern "C" {
 
 using namespace godot;
 
+
 class GDLua : public RefCounted {
 	GDCLASS(GDLua, RefCounted)
 
@@ -29,13 +30,21 @@ protected:
 	bool _running = false;
 	String error_message = String("");
 
+	bool _waiting = false;
+	bool _pending_resume = false;
+	Variant _pending_value;
+
+	void _resume_coroutine(Variant value);
+
+	friend int lua_callable_dispatch(lua_State *L);
+
 public:
 	GDLua();
 	~GDLua() override;
 
 	void register_function(String name, Callable cb);
 
-	bool immediate(const String &p_code);
+	bool execute(const String &p_code);
 
 	bool is_valid(); 
 	bool is_running();
