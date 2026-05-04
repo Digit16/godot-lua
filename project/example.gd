@@ -1,27 +1,23 @@
 extends Node
 
 
-func my_print(text):
-	print("myprint was called!")
-	print("myprint:", text)
 
-func my_add(a, b):
-	var res = a + b
-	#return a + b
+func delay_add(a, b):
 	await get_tree().create_timer(1.0).timeout
-	#return res;
-	return res
+	return a + b
 
 func _ready() -> void:
 	var example := GDLua.new()
-	example.register_function("print", my_print)
-	example.register_function("my_print", my_print)
-	example.register_function("myadd", my_add)
-	var success = example.execute("print(myadd(1,2))")
+	example.register_function("print", print)
+	example.register_function("delay_add", delay_add)
+	var success = example.execute("print(delay_add(1,2))")
 	if !success: print(example.get_error())
 	
 	for i in range(100):
-		await get_tree().create_timer(0.1).timeout
+		if example.is_waiting():
+			await get_tree().create_timer(0.2).timeout
+			print("waiting...")
+			continue
 		example.step(1, false)
 		if not example.is_running():
 			break;
