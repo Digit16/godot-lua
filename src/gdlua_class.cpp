@@ -182,46 +182,6 @@ void GDLua::disconnect_pending() {
     }
 }
 
-int _lua_callable_dispatch(lua_State *L) {
-    Callable *cb   = (Callable *)lua_touserdata(L, lua_upvalueindex(1));
-    GDLua    *self = (GDLua *)   lua_touserdata(L, lua_upvalueindex(2));
-
-    if (!cb || !cb->is_valid()) {
-        return luaL_error(L, "callable is invalid or has been freed");
-    }
-
-    int expected = cb->get_argument_count();
-    int argc     = lua_gettop(L);
-
-    if (expected >= 0 && argc != expected) {
-        return luaL_error(L, "wrong number of arguments (expected %d, got %d)", expected, argc);
-    }
-
-    Array godot_args;
-    for (int i = 1; i <= argc; i++) {
-        if      (lua_isnumber(L, i))  { godot_args.push_back(lua_tonumber(L, i)); }
-        else if (lua_isstring(L, i))  { godot_args.push_back(String(lua_tostring(L, i))); }
-        else if (lua_isboolean(L, i)) { godot_args.push_back((bool)lua_toboolean(L, i)); }
-        else if (lua_isnil(L, i))     { godot_args.push_back(Variant()); }
-        else return luaL_error(L, "unsupported argument type '%s' at index %d",
-                luaL_typename(L, i), i);
-    }
-
-    Variant ret = cb->callv(godot_args);
-
-    if (ret.get_type() == Variant::OBJECT) {
-        godot::Object* obj = ret;
-        if (obj->has_signal("completed")) {
-            self->_pending_signal_source = obj;
-            obj->connect("completed", callable_mp(self, &GDLua::_resume_coroutine));
-            self->_waiting = true;
-            return lua_yield(L, 0);
-        }
-    }
-
-    return lua_push_godot_variant(L, ret);
-}
-
 bool GDLua::start() {
     if (L) return true;
     L = lua_newstate(gdlua_bounded_alloc, &alloc_data, 0);
@@ -263,4 +223,44 @@ void GDLua::save_lua_error(lua_State *state) {
     const char *err = lua_tostring(state, -1);
     set_error(err ? err : "unknown");
     lua_pop(state, 1);
+}
+
+int _lua_callable_dispatch(lua_State *L) {
+    Callable *cb   = (Callable *)lua_touserdata(L, lua_upvalueindex(1));
+    GDLua    *self = (GDLua *)   lua_touserdata(L, lua_upvalueindex(2));
+
+    if (!cb || !cb->is_valid()) {
+        return luaL_error(L, "callable is invalid or has been freed");
+    }
+
+    int expected = cb->get_argument_count();
+    int argc     = lua_gettop(L);
+
+    if (expected >= 0 && argc != expected) {
+        return luaL_error(L, "wrong number of arguments (expected %d, got %d)", expected, argc);
+    }
+
+    Array godot_args;
+    for (int i = 1; i <= argc; i++) {
+        if      (lua_isnumber(L, i))  { godot_args.push_back(lua_tonumber(L, i)); }
+        else if (lua_isstring(L, i))  { godot_args.push_back(String(lua_tostring(L, i))); }
+        else if (lua_isboolean(L, i)) { godot_args.push_back((bool)lua_toboolean(L, i)); }
+        else if (lua_isnil(L, i))     { godot_args.push_back(Variant()); }
+        else return luaL_error(L, "unsupported argument type '%s' at index %d",
+                luaL_typename(L, i), i);
+    }
+
+    Variant ret = cb->callv(godot_args);
+
+    if (ret.get_type() == Variant::OBJECT) {
+        godot::Object* obj = ret;
+        if (obj->has_signal("completed")) {
+            self->_pending_signal_source = obj;
+            obj->connect("completed", callable_mp(self, &GDLua::_resume_coroutine));
+            self->_waiting = true;
+            return lua_yield(L, 0);
+        }
+    }
+
+    return lua_push_godot_variant(L, ret);
 }
