@@ -40,6 +40,11 @@ public:
 	size_t get_memory_limit();
 	void   set_memory_limit(size_t limit);
 
+	Variant get_global(const String &name);
+	bool    set_global(const String &name, Variant value);
+	Variant get_local(const String &name);
+	bool    set_local(const String &name, Variant value);
+
 	bool reset();
 	bool compile(const String &p_code);
 	bool step(int steps=1, bool line=false);

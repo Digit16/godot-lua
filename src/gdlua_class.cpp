@@ -7,28 +7,44 @@
 
 /* HELPERS ---------------------------------------------------------------------------------------- */
 
-static int lua_push_godot_variant(lua_State *L, Variant val) {
+static bool lua_push_godot_variant(lua_State *L, Variant val) {
     switch (val.get_type()) {
-        case Variant::INT:    lua_pushinteger(L, (lua_Integer)val); return 1;
-        case Variant::FLOAT:  lua_pushnumber(L, (lua_Number)val);   return 1;
-        case Variant::BOOL:   lua_pushboolean(L, (bool)val);        return 1;
-        case Variant::STRING: lua_pushstring(L, String(val).utf8().get_data()); return 1;
-        case Variant::NIL:    return 0;
-        default: break;
+        case Variant::INT:    lua_pushinteger(L, (lua_Integer)val); return true;
+        case Variant::FLOAT:  lua_pushnumber(L,  (lua_Number)val);  return true;
+        case Variant::BOOL:   lua_pushboolean(L, (bool)val);        return true;
+        case Variant::STRING: lua_pushstring(L, String(val).utf8().get_data()); return true;
+        case Variant::NIL:    lua_pushnil(L);                       return true;
+        default:              return false;
     }
-    
+}
+
+static int lua_push_godot_variant_or_error(lua_State *L, Variant val) {
+    if (lua_push_godot_variant(L, val)) return 1;
+
     if (val.get_type() == Variant::OBJECT) {
-        godot::Object* obj = val;
+        godot::Object *obj = val;
         return luaL_error(L, "unsupported return type 'Object' (class: '%s')",
             obj->get_class().utf8().get_data());
-        }
+    }
     return luaL_error(L, "unsupported return type '%s'",
         Variant::get_type_name(val.get_type()).utf8().get_data());
 }
 
 static int resume_wrapper(lua_State *L) {
     const Variant *var = (const Variant *)lua_touserdata(L, lua_upvalueindex(1));
-    return lua_push_godot_variant(L, *var);
+    return lua_push_godot_variant_or_error(L, *var);
+}
+
+static Variant lua_get_godot_variant(lua_State *L, int idx) {
+    switch (lua_type(L, idx)) {
+        case LUA_TBOOLEAN: return Variant((bool)lua_toboolean(L, idx));
+        case LUA_TNUMBER:
+            if (lua_isinteger(L, idx)) return Variant((int64_t)lua_tointeger(L, idx));
+            return Variant((double)lua_tonumber(L, idx));
+        case LUA_TSTRING:  return Variant(String(lua_tostring(L, idx)));
+        case LUA_TNIL:
+        default:           return Variant();
+    }
 }
 
 /* GODOT BINDINGS --------------------------------------------------------------------------------- */
@@ -45,6 +61,10 @@ void GDLua::_bind_methods() {
     godot::ClassDB::bind_method(D_METHOD("get_memory_used"),                       &GDLua::get_memory_used);
     godot::ClassDB::bind_method(D_METHOD("get_memory_limit"),                      &GDLua::get_memory_limit);
     godot::ClassDB::bind_method(D_METHOD("set_memory_limit", "limit"),             &GDLua::set_memory_limit);
+    godot::ClassDB::bind_method(D_METHOD("get_global", "name"),                    &GDLua::get_global);
+    godot::ClassDB::bind_method(D_METHOD("set_global", "name", "value"),           &GDLua::set_global);
+    godot::ClassDB::bind_method(D_METHOD("get_local",  "name"),                    &GDLua::get_local);
+    godot::ClassDB::bind_method(D_METHOD("set_local",  "name", "value"),           &GDLua::set_local);
     godot::ClassDB::bind_method(D_METHOD("reset"),                                 &GDLua::reset);
     godot::ClassDB::bind_method(D_METHOD("compile", "code"),                       &GDLua::compile);
     godot::ClassDB::bind_method(D_METHOD("step", "steps", "line"),                 &GDLua::step);
@@ -81,6 +101,72 @@ bool   GDLua::is_error() { return !_error_message.is_empty(); }
 size_t GDLua::get_memory_used()              { return alloc_data.used; }
 size_t GDLua::get_memory_limit()             { return alloc_data.size; }
 void   GDLua::set_memory_limit(size_t limit) { alloc_data.size = limit; }
+
+Variant GDLua::get_global(const String &name) {
+    ERR_FAIL_COND_V_MSG(L == nullptr, Variant(), "Lua state is not initialized");
+    lua_State *state = L_co ? L_co : L;
+
+    lua_getglobal(state, name.utf8().get_data());
+    Variant result = lua_get_godot_variant(state, -1);
+    lua_pop(state, 1);
+    return result;
+}
+
+bool GDLua::set_global(const String &name, Variant value) {
+    ERR_FAIL_COND_V_MSG(L == nullptr, false, "Lua state is not initialized");
+    lua_State *state = L_co ? L_co : L;
+
+    if (lua_push_godot_variant(state, value) == 0)
+        lua_pushnil(state);
+    lua_setglobal(state, name.utf8().get_data());
+    return true;
+}
+
+Variant GDLua::get_local(const String &name) {
+    ERR_FAIL_COND_V_MSG(L_co == nullptr, Variant(), "No active coroutine thread");
+    const char *cname = name.utf8().get_data();
+
+    for (int level = 0; ; level++) {
+        lua_Debug ar;
+        if (lua_getstack(L_co, level, &ar) == 0) break;
+
+        for (int i = 1; ; i++) {
+            const char *local_name = lua_getlocal(L_co, &ar, i);
+            if (!local_name) break;
+            if (strcmp(local_name, cname) == 0) {
+                Variant result = lua_get_godot_variant(L_co, -1);
+                lua_pop(L_co, 1);
+                return result;
+            }
+            lua_pop(L_co, 1);
+        }
+    }
+    return Variant();
+}
+
+bool GDLua::set_local(const String &name, Variant value) {
+    ERR_FAIL_COND_V_MSG(L_co == nullptr, false, "No active coroutine thread");
+    const char *cname = name.utf8().get_data();
+
+    for (int level = 0; ; level++) {
+        lua_Debug ar;
+        if (lua_getstack(L_co, level, &ar) == 0) break;
+
+        for (int i = 1; ; i++) {
+            const char *local_name = lua_getlocal(L_co, &ar, i);
+            if (!local_name) break;
+            if (strcmp(local_name, cname) == 0) {
+                lua_pop(L_co, 1); // pop the fetched value
+                if (lua_push_godot_variant(L_co, value) == 0)
+                    lua_pushnil(L_co);
+                lua_setlocal(L_co, &ar, i);
+                return true;
+            }
+            lua_pop(L_co, 1);
+        }
+    }
+    return false;
+}
 
 bool GDLua::reset() { return close() && start(); }
 
@@ -262,5 +348,5 @@ int _lua_callable_dispatch(lua_State *L) {
         }
     }
 
-    return lua_push_godot_variant(L, ret);
+    return lua_push_godot_variant_or_error(L, ret);
 }
