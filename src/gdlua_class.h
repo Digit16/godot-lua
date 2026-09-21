@@ -63,7 +63,7 @@ private:
 	bool _pending_resume = false;
 	String  _error_message{};
 	Variant _pending_value{};
-	godot::Object *_pending_signal_source = nullptr;
+	uint64_t _pending_signal_source_id = 0;
 
 	void _resume_coroutine(Variant value);
 	void disconnect_pending();

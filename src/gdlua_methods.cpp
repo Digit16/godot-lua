@@ -1,38 +1,69 @@
 #include "gdlua_methods.h"
 
 #include <stdio.h>
-#include <corecrt_malloc.h>
+#include <cstdlib>
 
 #include "godot_cpp/variant/utility_functions.hpp"
 #include "godot_cpp/variant/variant.hpp"
 #include "godot_cpp/classes/wrapped.hpp"
 
-gdlua_alloc_data data_val = {0, 100000};
-gdlua_alloc_data *data = &data_val;
-
 void *gdlua_bounded_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
-    // gdlua_alloc_data *data = (gdlua_alloc_data *)ud;
-	printf("[Lua alloc] osize=%zu nsize=%zu used=%zu max=%zu\n",
-       osize, nsize, data->used, data->size);
+    gdlua_alloc_data *data = (gdlua_alloc_data *)ud;
 
     /* if ptr is NULL, osize contains type id of data allocated instead of old size */
     /* reset it to zero to properly represent already allocated size */
-    if (ptr == NULL) { osize = 0; }
+    if (ptr == NULL) {
+        osize = 0;
+    }
 
     /* if new size is zero, free memory */
     if (nsize == 0) {
         if (ptr) {
-            // free(ptr);
-            // data->used -= osize;
+            free(ptr);
+            if (data) {
+                if (data->used < osize) {
+                    printf("[Lua alloc warning] Memory underflow on free: used=%zu, freed=%zu\n", data->used, osize);
+                    data->used = 0;
+                } else {
+                    data->used -= osize;
+                }
+            }
         }
         return NULL;
     }
 
-    /* this also fails if reducing size of allocation and used memory is already over limit */
-    // if (data->used + (nsize - osize) > data->size) { return NULL; }
+    /* if expanding allocation, check if memory limit is exceeded */
+    if (nsize > osize) {
+        size_t diff = nsize - osize;
+        if (data && data->size > 0) {
+            if (diff > data->size || data->used > data->size - diff) {
+                printf("[Lua alloc error] Memory limit exceeded: used=%zu + req=%zu > limit=%zu\n",
+                       data->used, diff, data->size);
+                return NULL;
+            }
+        }
+    }
 
     void *new_ptr = realloc(ptr, nsize);
-    // if (new_ptr) { data->used += nsize - osize; }
+    if (new_ptr == NULL) {
+        printf("[Lua alloc error] System realloc failed: requested %zu bytes (used=%zu, limit=%zu)\n",
+               nsize, data ? data->used : 0, data ? data->size : 0);
+        return NULL;
+    }
+
+    if (data) {
+        if (nsize > osize) {
+            data->used += (nsize - osize);
+        } else {
+            size_t diff = osize - nsize;
+            if (data->used < diff) {
+                printf("[Lua alloc warning] Memory underflow on shrink: used=%zu, shrink=%zu\n", data->used, diff);
+                data->used = 0;
+            } else {
+                data->used -= diff;
+            }
+        }
+    }
     return new_ptr;
 }
 

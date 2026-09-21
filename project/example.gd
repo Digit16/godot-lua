@@ -14,7 +14,7 @@ func _ready() -> void:
 	if !success:
 		print(code.get_error())
 	code.set_global("val", 5)
-	success = code.execute("my.print(delaay_add(2, 5))")
+	success = code.execute("my.print(delay_add(2, 5))")
 	if !success:
 		print(code.get_error())
 	
@@ -26,7 +26,7 @@ func _ready() -> void:
 		code.run()
 		if not code.is_running():
 			break
-	
+	code.abort()
 	print("DONE!!!")
 	await get_tree().create_timer(11.5).timeout
 	get_tree().quit()

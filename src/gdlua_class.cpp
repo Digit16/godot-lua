@@ -3,6 +3,7 @@
 
 #include "godot_cpp/core/error_macros.hpp"
 #include "godot_cpp/core/print_string.hpp"
+#include "godot_cpp/core/object.hpp"
 
 
 /* HELPERS ---------------------------------------------------------------------------------------- */
@@ -256,16 +257,20 @@ bool GDLua::abort() { return close_thread(); }
 /* PRIVATE API ------------------------------------------------------------------------------------ */
 
 void GDLua::_resume_coroutine(Variant value) {
-    _waiting        = false;
-    _pending_resume = true;
-    _pending_value  = value;
+    _waiting                  = false;
+    _pending_resume           = true;
+    _pending_value            = value;
+    _pending_signal_source_id = 0;
 }
 
 void GDLua::disconnect_pending() {
-    if (_pending_signal_source && _pending_signal_source->has_signal("completed")) {
-        _pending_signal_source->disconnect("completed", callable_mp(this, &GDLua::_resume_coroutine));
-        _pending_signal_source = nullptr;
-    }
+	if (_pending_signal_source_id != 0) {
+		godot::Object *obj = godot::ObjectDB::get_instance(_pending_signal_source_id);
+		if (obj && obj->has_signal("completed")) {
+			obj->disconnect("completed", callable_mp(this, &GDLua::_resume_coroutine));
+		}
+		_pending_signal_source_id = 0;
+	}
 }
 
 bool GDLua::start() {
@@ -278,22 +283,24 @@ bool GDLua::start() {
 
 bool GDLua::close() {
 	if (!L) return true;
-    disconnect_pending();
-    lua_close(L);
-    L = nullptr;
-    return true;
+	close_thread();
+	lua_close(L);
+	L = nullptr;
+	return true;
 }
 
 bool GDLua::close_thread() {
-    if (L_co == nullptr) return true;
-    _running = false;
-    disconnect_pending();
-    bool ok = lua_closethread(L_co, nullptr) == LUA_OK;
-    if (!ok) save_lua_error(L_co);
-    luaL_unref(L, LUA_REGISTRYINDEX, L_co_ref);
-    L_co_ref = LUA_NOREF;
-    L_co = nullptr;
-    return ok;
+	if (L_co == nullptr) return true;
+	_running = false;
+	_waiting = false;
+	_pending_resume = false;
+	disconnect_pending();
+	bool ok = lua_closethread(L_co, nullptr) == LUA_OK;
+	if (!ok) save_lua_error(L_co);
+	luaL_unref(L, LUA_REGISTRYINDEX, L_co_ref);
+	L_co_ref = LUA_NOREF;
+	L_co = nullptr;
+	return ok;
 }
 
 void GDLua::set_error(const String &error) {
@@ -341,7 +348,7 @@ int _lua_callable_dispatch(lua_State *L) {
     if (ret.get_type() == Variant::OBJECT) {
         godot::Object* obj = ret;
         if (obj->has_signal("completed")) {
-            self->_pending_signal_source = obj;
+            self->_pending_signal_source_id = obj->get_instance_id();
             obj->connect("completed", callable_mp(self, &GDLua::_resume_coroutine));
             self->_waiting = true;
             return lua_yield(L, 0);
