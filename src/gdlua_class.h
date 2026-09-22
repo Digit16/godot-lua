@@ -3,6 +3,7 @@
 #include "godot_cpp/classes/ref_counted.hpp"
 #include "godot_cpp/classes/wrapped.hpp"
 #include "godot_cpp/variant/variant.hpp"
+#include "godot_cpp/variant/dictionary.hpp"
 
 extern "C" {
 #include "lua.h"
@@ -22,11 +23,19 @@ protected:
 	static void _bind_methods();
 
 public:
+	static bool log_error;
+	static bool log_alloc;
+
+	static void set_error_logging(bool enable);
+	static bool get_error_logging();
+	static void set_alloc_logging(bool enable);
+	static bool get_alloc_logging();
+
 	GDLua();
 	~GDLua() override;
 
 	void register_function(String name, Callable cb);
-	bool execute(const String &p_code);
+	bool execute(const String &p_code, const String &p_chunk_name = "chunk");
 
 	bool is_valid(); 
 	bool is_running();
@@ -46,10 +55,14 @@ public:
 	bool    set_local(const String &name, Variant value);
 
 	bool reset();
-	bool compile(const String &p_code);
+	bool compile(const String &p_code, const String &p_chunk_name = "chunk");
 	bool step(int steps=1, bool line=false);
 	bool run();
 	bool abort();
+
+	int        get_current_line(int level = 0);
+	String     get_current_source(int level = 0);
+	Dictionary get_debug_info(int level = 0);
 	
 private:
 	lua_State *L       = nullptr;

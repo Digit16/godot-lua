@@ -1,4 +1,5 @@
 #include "gdlua_methods.h"
+#include "gdlua_class.h"
 
 #include <stdio.h>
 #include <cstdlib>
@@ -14,6 +15,11 @@ void *gdlua_bounded_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
     /* reset it to zero to properly represent already allocated size */
     if (ptr == NULL) {
         osize = 0;
+    }
+
+    if (GDLua::log_alloc && data) {
+        printf("[Lua alloc] osize=%zu nsize=%zu used=%zu max=%zu\n",
+               osize, nsize, data->used, data->size);
     }
 
     /* if new size is zero, free memory */

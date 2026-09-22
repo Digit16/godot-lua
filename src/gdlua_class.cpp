@@ -50,9 +50,22 @@ static Variant lua_get_godot_variant(lua_State *L, int idx) {
 
 /* GODOT BINDINGS --------------------------------------------------------------------------------- */
 
+bool GDLua::log_error = false;
+bool GDLua::log_alloc = false;
+
+void GDLua::set_error_logging(bool enable) { log_error = enable; }
+bool GDLua::get_error_logging()            { return log_error; }
+void GDLua::set_alloc_logging(bool enable) { log_alloc = enable; }
+bool GDLua::get_alloc_logging()            { return log_alloc; }
+
 void GDLua::_bind_methods() {
+    godot::ClassDB::bind_static_method("GDLua", D_METHOD("set_error_logging", "enable"), &GDLua::set_error_logging);
+    godot::ClassDB::bind_static_method("GDLua", D_METHOD("get_error_logging"),           &GDLua::get_error_logging);
+    godot::ClassDB::bind_static_method("GDLua", D_METHOD("set_alloc_logging", "enable"), &GDLua::set_alloc_logging);
+    godot::ClassDB::bind_static_method("GDLua", D_METHOD("get_alloc_logging"),           &GDLua::get_alloc_logging);
+
     godot::ClassDB::bind_method(D_METHOD("register_function", "name", "callable"), &GDLua::register_function);
-	godot::ClassDB::bind_method(D_METHOD("execute", "code"),                       &GDLua::execute);
+	godot::ClassDB::bind_method(D_METHOD("execute", "code", "chunk_name"),         &GDLua::execute, DEFVAL("chunk"));
     godot::ClassDB::bind_method(D_METHOD("is_valid"),                              &GDLua::is_valid);
     godot::ClassDB::bind_method(D_METHOD("is_running"),                            &GDLua::is_running);
     godot::ClassDB::bind_method(D_METHOD("is_waiting"),                            &GDLua::is_waiting);
@@ -67,10 +80,13 @@ void GDLua::_bind_methods() {
     godot::ClassDB::bind_method(D_METHOD("get_local",  "name"),                    &GDLua::get_local);
     godot::ClassDB::bind_method(D_METHOD("set_local",  "name", "value"),           &GDLua::set_local);
     godot::ClassDB::bind_method(D_METHOD("reset"),                                 &GDLua::reset);
-    godot::ClassDB::bind_method(D_METHOD("compile", "code"),                       &GDLua::compile);
-    godot::ClassDB::bind_method(D_METHOD("step", "steps", "line"),                 &GDLua::step);
+    godot::ClassDB::bind_method(D_METHOD("compile", "code", "chunk_name"),         &GDLua::compile, DEFVAL("chunk"));
+    godot::ClassDB::bind_method(D_METHOD("step", "steps", "line"),                 &GDLua::step, DEFVAL(1), DEFVAL(false));
     godot::ClassDB::bind_method(D_METHOD("run"),                                   &GDLua::run);
     godot::ClassDB::bind_method(D_METHOD("abort"),                                 &GDLua::abort);
+    godot::ClassDB::bind_method(D_METHOD("get_current_line",   "level"),           &GDLua::get_current_line,   DEFVAL(0));
+    godot::ClassDB::bind_method(D_METHOD("get_current_source", "level"),           &GDLua::get_current_source, DEFVAL(0));
+    godot::ClassDB::bind_method(D_METHOD("get_debug_info",     "level"),           &GDLua::get_debug_info,     DEFVAL(0));
 }
 
 /* CONSTRUCTOR / DESCRUCTOR ----------------------------------------------------------------------- */
@@ -89,7 +105,7 @@ void GDLua::register_function(String name, Callable cb) {
 }
 
 /* Create method that runs given string as lua code */
-bool GDLua::execute(const String &code) { return compile(code) && run(); }
+bool GDLua::execute(const String &code, const String &chunk_name) { return compile(code, chunk_name) && run(); }
 
 bool GDLua::is_valid()    { return L != nullptr;}
 bool GDLua::is_running()  { return _running;}
@@ -171,7 +187,7 @@ bool GDLua::set_local(const String &name, Variant value) {
 
 bool GDLua::reset() { return close() && start(); }
 
-bool GDLua::compile(const String &p_code) {
+bool GDLua::compile(const String &p_code, const String &p_chunk_name) {
     /* throw error if not initialized*/
 	ERR_FAIL_COND_V_MSG(L == nullptr, false, "Lua state is not initialized");
     
@@ -182,12 +198,16 @@ bool GDLua::compile(const String &p_code) {
     CharString code_utf8 = p_code.utf8();
     const char *code = code_utf8.get_data();
 
+    String name = p_chunk_name.is_empty() ? "chunk" : p_chunk_name;
+    CharString name_utf8 = name.utf8();
+    const char *chunk_name = name_utf8.get_data();
+
     /* create new thread */
     L_co = lua_newthread(L);
     L_co_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 
     /* compile code */
-    if (luaL_loadstring(L_co, code) != LUA_OK) {
+    if (luaL_loadbuffer(L_co, code, code_utf8.length(), chunk_name) != LUA_OK) {
         _running = false;
         save_lua_error(L_co);
         return false;
@@ -254,6 +274,57 @@ bool GDLua::step(int steps, bool line) {
 bool GDLua::run()   { return step(-1, false); }
 bool GDLua::abort() { return close_thread(); }
 
+int GDLua::get_current_line(int level) {
+    if (L_co == nullptr) return -1;
+    lua_Debug ar;
+    if (lua_getstack(L_co, level, &ar) == 0) return -1;
+    if (lua_getinfo(L_co, "l", &ar) == 0) return -1;
+    return ar.currentline;
+}
+
+String GDLua::get_current_source(int level) {
+    if (L_co == nullptr) return String();
+    lua_Debug ar;
+    if (lua_getstack(L_co, level, &ar) == 0) return String();
+    if (lua_getinfo(L_co, "S", &ar) == 0) return String();
+    return ar.source ? String(ar.source) : String();
+}
+
+Dictionary GDLua::get_debug_info(int level) {
+    Dictionary info;
+    if (L_co == nullptr) {
+        info["valid"] = false;
+        return info;
+    }
+
+    lua_Debug ar;
+    if (lua_getstack(L_co, level, &ar) == 0) {
+        info["valid"] = false;
+        return info;
+    }
+
+    if (lua_getinfo(L_co, "nSlut", &ar) == 0) {
+        info["valid"] = false;
+        return info;
+    }
+
+    info["valid"]             = true;
+    info["line"]              = ar.currentline;
+    info["source"]            = ar.source ? String(ar.source) : String();
+    info["short_source"]      = String(ar.short_src);
+    info["function"]          = ar.name ? String(ar.name) : String();
+    info["namewhat"]          = ar.namewhat ? String(ar.namewhat) : String();
+    info["what"]              = ar.what ? String(ar.what) : String();
+    info["line_defined"]      = ar.linedefined;
+    info["last_line_defined"] = ar.lastlinedefined;
+    info["num_upvalues"]      = (int)ar.nups;
+    info["num_params"]        = (int)ar.nparams;
+    info["is_vararg"]         = (bool)ar.isvararg;
+    info["is_tail_call"]      = (bool)ar.istailcall;
+
+    return info;
+}
+
 /* PRIVATE API ------------------------------------------------------------------------------------ */
 
 void GDLua::_resume_coroutine(Variant value) {
@@ -282,6 +353,7 @@ bool GDLua::start() {
 }
 
 bool GDLua::close() {
+	clear_error();
 	if (!L) return true;
 	close_thread();
 	lua_close(L);
@@ -295,17 +367,18 @@ bool GDLua::close_thread() {
 	_waiting = false;
 	_pending_resume = false;
 	disconnect_pending();
-	bool ok = lua_closethread(L_co, nullptr) == LUA_OK;
-	if (!ok) save_lua_error(L_co);
+	lua_closethread(L_co, nullptr);
 	luaL_unref(L, LUA_REGISTRYINDEX, L_co_ref);
 	L_co_ref = LUA_NOREF;
 	L_co = nullptr;
-	return ok;
+	return true;
 }
 
 void GDLua::set_error(const String &error) {
     _error_message = error;
-    ERR_PRINT(_error_message);
+    if (log_error) {
+        ERR_PRINT(_error_message);
+    }
 }
 
 void GDLua::save_lua_error(lua_State *state) {
