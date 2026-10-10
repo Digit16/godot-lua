@@ -84,6 +84,7 @@ void GDLua::_bind_methods() {
     godot::ClassDB::bind_method(D_METHOD("step", "steps", "line"),                 &GDLua::step, DEFVAL(1), DEFVAL(false));
     godot::ClassDB::bind_method(D_METHOD("run"),                                   &GDLua::run);
     godot::ClassDB::bind_method(D_METHOD("abort"),                                 &GDLua::abort);
+    godot::ClassDB::bind_method(D_METHOD("define_function", "name", "code", "chunk_name"), &GDLua::define_function, DEFVAL(""));
     godot::ClassDB::bind_method(D_METHOD("get_current_line",   "level"),           &GDLua::get_current_line,   DEFVAL(0));
     godot::ClassDB::bind_method(D_METHOD("get_current_source", "level"),           &GDLua::get_current_source, DEFVAL(0));
     godot::ClassDB::bind_method(D_METHOD("get_debug_info",     "level"),           &GDLua::get_debug_info,     DEFVAL(0));
@@ -193,6 +194,7 @@ bool GDLua::compile(const String &p_code, const String &p_chunk_name) {
     
     /* close thread if previous exists*/
     close_thread();
+    clear_error();
 
     /* get ASCII code (utf-8 segments will be treated as next ASCII chars) */ 
     CharString code_utf8 = p_code.utf8();
@@ -274,6 +276,94 @@ bool GDLua::step(int steps, bool line) {
 bool GDLua::run()   { return step(-1, false); }
 bool GDLua::abort() { return close_thread(); }
 
+static int _lua_function_wrapper_k(lua_State *L, int status, lua_KContext ctx) {
+    int argc = (int)ctx;
+    return lua_gettop(L) - (argc + 1);
+}
+
+static int _lua_function_wrapper(lua_State *L) {
+    // Upvalues:
+    // 1: compiled chunk (function)
+    // 2: base_env (isolated environment table)
+    int argc = lua_gettop(L);
+
+    // 1. Create clean call environment with __index = base_env
+    lua_newtable(L);
+    int env_idx = lua_gettop(L);
+
+    lua_newtable(L); // metatable
+    lua_pushvalue(L, lua_upvalueindex(2)); // base_env
+    lua_setfield(L, -2, "__index");
+    lua_setmetatable(L, env_idx); // call_env.__index = base_env
+
+    // 2. Assign arguments into arg[] table starting with 1
+    lua_createtable(L, argc, 1);
+    for (int i = 1; i <= argc; i++) {
+        lua_pushvalue(L, i);
+        lua_rawseti(L, -2, i);
+    }
+    lua_pushinteger(L, argc);
+    lua_setfield(L, -2, "n");
+    lua_setfield(L, env_idx, "arg");
+
+    // 3. Set upvalue 1 (_ENV) of chunk to call_env
+    lua_pushvalue(L, lua_upvalueindex(1)); // chunk
+    int chunk_idx = lua_gettop(L);
+    lua_pushvalue(L, env_idx);             // call_env copy
+    lua_setupvalue(L, chunk_idx, 1);       // sets upvalue 1 of chunk, pops call_env copy
+
+    // 4. Forward caller arguments for the chunk
+    for (int i = 1; i <= argc; i++) {
+        lua_pushvalue(L, i);
+    }
+
+    // 5. Call chunk with continuation (ctx = argc) to support yielding (wait, coroutines)
+    lua_callk(L, argc, LUA_MULTRET, (lua_KContext)argc, _lua_function_wrapper_k);
+    return lua_gettop(L) - (argc + 1);
+}
+
+bool GDLua::define_function(const String &p_name, const String &p_code, const String &p_chunk_name) {
+    ERR_FAIL_COND_V_MSG(L == nullptr, false, "Lua state is not initialized");
+    clear_error();
+
+    CharString code_utf8 = p_code.utf8();
+    String cname = p_chunk_name.is_empty() ? p_name + String(".lua") : p_chunk_name;
+    CharString cname_utf8 = cname.utf8();
+
+    // 1. Verbatim compilation (zero code concatenation!)
+    if (luaL_loadbuffer(L, code_utf8.get_data(), code_utf8.length(), cname_utf8.get_data()) != LUA_OK) {
+        save_lua_error(L);
+        return false;
+    }
+    int chunk_idx = lua_gettop(L);
+
+    // 2. Create isolated base environment table with metatable { __index = _G }
+    lua_newtable(L);
+    int env_idx = lua_gettop(L);
+
+    lua_newtable(L); // metatable
+    lua_pushglobaltable(L);
+    lua_setfield(L, -2, "__index");
+    lua_setmetatable(L, env_idx); // base_env.__index = _G
+
+    // 3. Set upvalue 1 (_ENV) of the chunk to base_env
+    lua_pushvalue(L, env_idx);
+    lua_setupvalue(L, chunk_idx, 1);
+
+    // 4. Push C closure with upvalues: chunk, base_env
+    lua_pushvalue(L, chunk_idx);
+    lua_pushvalue(L, env_idx);
+    lua_pushcclosure(L, _lua_function_wrapper, 2);
+
+    // 5. Assign C closure to _G[name]
+    lua_setglobal(L, p_name.utf8().get_data());
+
+    // 6. Clean up original 2 values on stack (chunk, base_env)
+    lua_pop(L, 2);
+
+    return true;
+}
+
 int GDLua::get_current_line(int level) {
     if (L_co == nullptr) return -1;
     lua_Debug ar;
@@ -349,6 +439,7 @@ bool GDLua::start() {
     L = lua_newstate(gdlua_bounded_alloc, &alloc_data, 0);
     if (!L) { set_error("failed to create lua state"); return false; }
     luaopen_base(L);
+    lua_settop(L, 0);
     return true;
 }
 

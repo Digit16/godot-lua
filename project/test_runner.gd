@@ -85,6 +85,23 @@ func _ready() -> void:
 	# 7. Multi-Instance Isolation
 	test_multi_instance_isolation()
 
+	# 8. Function Definition & Environment Isolation
+	test_define_function_basic()
+	test_define_function_environment_isolation()
+	test_define_function_non_persistent_lifecycle()
+	test_define_function_hot_reloading()
+	test_define_function_syntax_error()
+	await test_define_function_async_wait()
+	test_define_function_stepping()
+	test_define_function_mid_stepping()
+	test_define_function_debug_info()
+	test_define_function_nested_call_stack()
+	test_define_function_runtime_error_line()
+	test_define_function_params_and_multi_return()
+	test_define_function_mutual_recursion()
+	test_define_function_custom_chunk_name()
+	test_define_function_arg_table_indexing()
+
 	print("\n========================================")
 	print("   RESULTS: %d / %d Tests Passed" % [passed_tests, total_tests])
 	print("========================================")
@@ -586,3 +603,387 @@ func test_multi_instance_isolation() -> void:
 	var val1 = lua1.get_global("inst_name")
 	var val2 = lua2.get_global("inst_name")
 	assert_test("Multi-Instance Isolation", val1 == "Instance 1" and val2 == "Instance 2", "val1=%s, val2=%s" % [val1, val2])
+
+# -----------------------------------------------------------------------------
+# 8. Function Definition & Environment Isolation
+# -----------------------------------------------------------------------------
+
+func test_define_function_basic() -> void:
+	var lua := GDLua.new()
+	var ok = lua.define_function("add", "return arg[1] + arg[2]")
+	assert_test("Define Function Basic - Registration", ok, lua.get_error())
+
+	lua.compile("result = add(10, 25)")
+	lua.run()
+	var res = lua.get_global("result")
+	assert_test("Define Function Basic - Execution", res == 35, "Expected 35, got %s, err: %s" % [str(res), lua.get_error()])
+
+func test_define_function_environment_isolation() -> void:
+	var lua := GDLua.new()
+	var ok_a = lua.define_function("func_a", "x = 99; return x")
+	var ok_b = lua.define_function("func_b", "return x")
+	assert_test("Define Function Isolation - Setup", ok_a and ok_b, lua.get_error())
+
+	lua.compile("res_a = func_a(); res_b = func_b()")
+	lua.run()
+	var res_a = lua.get_global("res_a")
+	var res_b = lua.get_global("res_b")
+	var global_x = lua.get_global("x")
+
+	var isolated = (res_a == 99) and (res_b == null) and (global_x == null)
+	assert_test("Define Function Isolation - Global Protection", isolated, "res_a=%s, res_b=%s, global_x=%s, err: %s" % [str(res_a), str(res_b), str(global_x), lua.get_error()])
+
+func test_define_function_non_persistent_lifecycle() -> void:
+	var lua := GDLua.new()
+	lua.define_function("counter", "val = (val or 0) + 1; return val")
+
+	lua.compile("c1 = counter(); c2 = counter()")
+	lua.run()
+	var c1 = lua.get_global("c1")
+	var c2 = lua.get_global("c2")
+	# Since local state resets each invocation, both c1 and c2 should be 1
+	assert_test("Define Function Non-Persistent State", c1 == 1 and c2 == 1, "c1=%s, c2=%s" % [str(c1), str(c2)])
+
+func test_define_function_hot_reloading() -> void:
+	var lua := GDLua.new()
+	lua.define_function("calc", "return arg[1] + arg[2]")
+	lua.compile("r1 = calc(3, 4)")
+	lua.run()
+	var r1 = lua.get_global("r1")
+
+	# Live redefine calc to multiplication
+	lua.define_function("calc", "return arg[1] * arg[2]")
+	lua.compile("r2 = calc(3, 4)")
+	lua.run()
+	var r2 = lua.get_global("r2")
+
+	assert_test("Define Function Hot Reloading", r1 == 7 and r2 == 12, "r1=%s, r2=%s" % [str(r1), str(r2)])
+
+func test_define_function_syntax_error() -> void:
+	var lua := GDLua.new()
+	var ok = lua.define_function("bad_func", "return arg[1] +")
+	var err = lua.get_error()
+	assert_test("Define Function Syntax Error Handling", not ok and err.contains("bad_func.lua"), "ok=%s, err=%s" % [str(ok), err])
+
+func test_define_function_async_wait() -> void:
+	var lua := GDLua.new()
+	lua.register_function("async_add", async_add)
+	lua.define_function("run_async", "return async_add(arg[1], arg[2])")
+
+	lua.compile("res = run_async(40, 60)")
+	await run_to_completion(lua)
+	var res = lua.get_global("res")
+	assert_test("Define Function Async Continuation Yielding", res == 100, "Expected 100, got %s" % str(res))
+
+func test_define_function_stepping() -> void:
+	var lua := GDLua.new()
+	var fn_code := """local x = arg[1] + 1
+local y = arg[2] * 2
+return x + y"""
+	var ok = lua.define_function("fn_calc", fn_code)
+	assert_test("Define Function Stepping - Registration", ok, "Failed to define fn_calc")
+
+	var caller_code := "res = fn_calc(10, 20)"
+	lua.compile(caller_code, "@main.lua")
+
+	# Step 1: Pauses before caller line 1
+	lua.step(100, true)
+	var s1_src = lua.get_current_source()
+	var s1_line = lua.get_current_line()
+
+	# Step 2: Enters fn_calc line 1 (local x = arg[1] + 1)
+	lua.step(100, true)
+	var s2_src = lua.get_current_source()
+	var s2_line = lua.get_current_line()
+
+	# Step 3: Enters fn_calc line 2 (local y = arg[2] * 2)
+	lua.step(100, true)
+	var s3_src = lua.get_current_source()
+	var s3_line = lua.get_current_line()
+	var x_val = lua.get_local("x")
+
+	# Step 4: Enters fn_calc line 3 (return x + y)
+	lua.step(100, true)
+	var s4_src = lua.get_current_source()
+	var s4_line = lua.get_current_line()
+	var y_val = lua.get_local("y")
+
+	# Run to completion
+	lua.run()
+	var res = lua.get_global("res")
+
+	var cond = (
+		s1_src == "@main.lua" and s1_line == 1 and
+		s2_src == "fn_calc.lua" and s2_line == 1 and
+		s3_src == "fn_calc.lua" and s3_line == 2 and x_val == 11 and
+		s4_src == "fn_calc.lua" and s4_line == 3 and y_val == 40 and
+		res == 51 and not lua.is_running() and not lua.is_error()
+	)
+	var detail = "s1=(%s:%d), s2=(%s:%d), s3=(%s:%d, x=%s), s4=(%s:%d, y=%s), res=%s, err=%s" % [
+		s1_src, s1_line, s2_src, s2_line, s3_src, s3_line, str(x_val), s4_src, s4_line, str(y_val), str(res), lua.get_error()
+	]
+	assert_test("Define Function Line Stepping & Local Inspection", cond, detail)
+
+func test_define_function_mid_stepping() -> void:
+	var lua := GDLua.new()
+	lua.define_function("dyn_func", "return 10")
+
+	var caller_code := """v1 = dyn_func()
+v2 = dyn_func()
+v3 = brand_new_func(5)"""
+	lua.compile(caller_code, "@caller.lua")
+
+	# Step 1: Pauses before line 1
+	lua.step(100, true)
+
+	# Step 2: Enters dyn_func
+	lua.step(100, true)
+	var in_fn_src = lua.get_current_source()
+	var in_fn_line = lua.get_current_line()
+
+	# Step 3: Finishes dyn_func and pauses before caller line 2
+	lua.step(100, true)
+	var v1 = lua.get_global("v1")
+	var v2_before = lua.get_global("v2")
+	var caller_line2 = lua.get_current_line()
+	var caller_src2 = lua.get_current_source()
+	var is_paused_midway = lua.is_running()
+
+	# While paused mid-execution:
+	# 1. Hot-reload existing dyn_func to return 999 instead of 10
+	var redef_ok = lua.define_function("dyn_func", "return 999")
+	# 2. Define brand-new function that didn't exist when caller was compiled
+	var def_new_ok = lua.define_function("brand_new_func", "return arg[1] * 100")
+
+	# Resume execution of the SAME running thread to completion
+	lua.run()
+	var v2 = lua.get_global("v2")
+	var v3 = lua.get_global("v3")
+	var finished_ok = not lua.is_running() and not lua.is_error()
+
+	var cond = (
+		in_fn_src == "dyn_func.lua" and in_fn_line == 1 and
+		v1 == 10 and
+		v2_before == null and
+		caller_line2 == 2 and caller_src2 == "@caller.lua" and
+		is_paused_midway and
+		redef_ok and def_new_ok and
+		v2 == 999 and
+		v3 == 500 and
+		finished_ok
+	)
+	var detail = "in_fn=(%s:%d), v1=%s, line2=(%s:%d), v2=%s, v3=%s, err=%s" % [
+		in_fn_src, in_fn_line, str(v1), caller_src2, caller_line2, str(v2), str(v3), lua.get_error()
+	]
+	assert_test("Define Function Mid-Stepping Definition & Hot-Reload", cond, detail)
+
+func test_define_function_debug_info() -> void:
+	var lua := GDLua.new()
+	var code := """local x = arg[1] + 1
+local y = arg[2] + 2
+return x + y"""
+	lua.define_function("dbg_calc", code)
+	lua.compile("res = dbg_calc(10, 20)", "@main.lua")
+
+	# Step 1: Pauses before main.lua:1
+	lua.step(100, true)
+	# Step 2: Enters dbg_calc line 1
+	lua.step(100, true)
+	# Step 3: Enters dbg_calc line 2
+	lua.step(100, true)
+
+	var info0 = lua.get_debug_info(0)
+
+	lua.run()
+	var res = lua.get_global("res")
+
+	var ok = (
+		info0.get("valid") == true and
+		info0.get("source") == "dbg_calc.lua" and
+		info0.get("short_source") == "[string \"dbg_calc.lua\"]" and
+		info0.get("what") == "main" and
+		info0.get("line_defined") == 0 and
+		info0.get("last_line_defined") == 0 and
+		info0.get("line") == 2 and
+		res == 33 and not lua.is_running() and not lua.is_error()
+	)
+	var detail = "valid=%s, src=%s, short_src=%s, what=%s, line=%s, def=%s-%s, res=%s, err=%s" % [
+		info0.get("valid"), info0.get("source"), info0.get("short_source"), info0.get("what"), info0.get("line"),
+		info0.get("line_defined"), info0.get("last_line_defined"), str(res), lua.get_error()
+	]
+	assert_test("Define Function Debug Info Inspection", ok, detail)
+
+func test_define_function_nested_call_stack() -> void:
+	var lua := GDLua.new()
+	var code_b := """local q = arg[1] * 2
+return q"""
+	var code_a := """local p = func_b(arg[1])
+return p + 1"""
+
+	lua.define_function("func_b", code_b)
+	lua.define_function("func_a", code_a)
+
+	lua.compile("out = func_a(5)", "@main.lua")
+
+	# Step 1: Pauses before main.lua:1
+	lua.step(100, true)
+	# Step 2: Enters func_a line 1
+	lua.step(100, true)
+	# Step 3: Enters func_b line 1
+	lua.step(100, true)
+
+	var l0_src = lua.get_current_source(0)
+	var l0_line = lua.get_current_line(0)
+
+	var found_func_a = false
+	var func_a_line = -1
+	var found_main = false
+	var main_line = -1
+
+	for lvl in range(1, 10):
+		var src = lua.get_current_source(lvl)
+		var ln = lua.get_current_line(lvl)
+		if src == "func_a.lua":
+			found_func_a = true
+			func_a_line = ln
+		elif src == "@main.lua":
+			found_main = true
+			main_line = ln
+
+	lua.run()
+	var out = lua.get_global("out")
+
+	var ok = (
+		l0_src == "func_b.lua" and l0_line == 1 and
+		found_func_a and func_a_line == 1 and
+		found_main and main_line == 1 and
+		out == 11 and not lua.is_running() and not lua.is_error()
+	)
+	var detail = "l0=(%s:%d), func_a=(%s:%d), main=(%s:%d), out=%s, err=%s" % [
+		l0_src, l0_line, str(found_func_a), func_a_line, str(found_main), main_line, str(out), lua.get_error()
+	]
+	assert_test("Define Function Multi-Level Call Stack", ok, detail)
+
+func test_define_function_runtime_error_line() -> void:
+	var lua := GDLua.new()
+	var code := """local a = 1
+local obj = nil
+obj.trigger_crash = 42
+return a"""
+	lua.define_function("crash_func", code)
+	lua.compile("crash_func()", "@caller.lua")
+
+	lua.run()
+
+	var is_err = lua.is_error()
+	var err_msg = lua.get_error()
+
+	var exact_line = err_msg.contains("[string \"crash_func.lua\"]:3:") and err_msg.contains("attempt to index a nil value")
+	assert_test("Define Function 1:1 Runtime Error Line", is_err and exact_line, "err=%s" % err_msg)
+
+func test_define_function_params_and_multi_return() -> void:
+	var lua := GDLua.new()
+	var code := """local count = arg.n
+return arg[1] or "default", (arg[2] or 0) * 10, count"""
+
+	lua.define_function("multi_test", code)
+
+	# Call 1: Fewer args than declared (arg[1] provided, arg[2] omitted -> nil)
+	lua.compile("r1, r2, r3 = multi_test('hello')")
+	lua.run()
+	var r1 = lua.get_global("r1")
+	var r2 = lua.get_global("r2")
+	var r3 = lua.get_global("r3")
+
+	# Call 2: Extra args passed
+	lua.compile("e1, e2, e3 = multi_test('val', 5, 'ignore', 10, 20, 30)")
+	lua.run()
+	var e1 = lua.get_global("e1")
+	var e2 = lua.get_global("e2")
+	var e3 = lua.get_global("e3")
+
+	var ok = (
+		r1 == "hello" and r2 == 0 and r3 == 1 and
+		e1 == "val" and e2 == 50 and e3 == 6 and
+		not lua.is_error()
+	)
+	var detail = "r1=%s, r2=%s, r3=%s, e1=%s, e2=%s, e3=%s, err=%s" % [
+		str(r1), str(r2), str(r3), str(e1), str(e2), str(e3), lua.get_error()
+	]
+	assert_test("Define Function Parameter Mismatches & Multi-Return", ok, detail)
+
+func test_define_function_mutual_recursion() -> void:
+	var lua := GDLua.new()
+	var code_even := """if arg[1] == 0 then return true end
+return is_odd(arg[1] - 1)"""
+	var code_odd := """if arg[1] == 0 then return false end
+return is_even(arg[1] - 1)"""
+
+	lua.define_function("is_even", code_even)
+	lua.define_function("is_odd", code_odd)
+
+	lua.compile("e4 = is_even(4); o4 = is_odd(4); e5 = is_even(5); o5 = is_odd(5)")
+	lua.run()
+
+	var e4 = lua.get_global("e4")
+	var o4 = lua.get_global("o4")
+	var e5 = lua.get_global("e5")
+	var o5 = lua.get_global("o5")
+
+	var ok = (e4 == true) and (o4 == false) and (e5 == false) and (o5 == true) and not lua.is_error()
+	var detail = "e4=%s, o4=%s, e5=%s, o5=%s, err=%s" % [str(e4), str(o4), str(e5), str(o5), lua.get_error()]
+	assert_test("Define Function Mutual Recursion", ok, detail)
+
+func test_define_function_custom_chunk_name() -> void:
+	var lua := GDLua.new()
+	var code := "return 42"
+	var custom_name := "@sensors/radar.lua"
+	var ok = lua.define_function("read_radar", code, custom_name)
+
+	lua.compile("val = read_radar()", "@system.lua")
+
+	# Step 1: main line 1
+	lua.step(100, true)
+	# Step 2: enters read_radar
+	lua.step(100, true)
+	var active_src = lua.get_current_source()
+
+	lua.run()
+	var val = lua.get_global("val")
+
+	var cond = ok and (active_src == custom_name) and (val == 42) and not lua.is_error()
+	assert_test("Define Function Custom Chunk Name", cond, "ok=%s, src=%s, val=%s, err=%s" % [ok, active_src, str(val), lua.get_error()])
+
+func test_define_function_arg_table_indexing() -> void:
+	var lua := GDLua.new()
+	var code := """
+	return arg[1], arg[2], arg[3], arg[0], arg[4], arg.n, (arg[1] + arg[2] + arg[3])
+	"""
+	var ok = lua.define_function("sum3", code)
+	assert_test("Define Function arg[] 1-based Indexing - Registration", ok, lua.get_error())
+
+	lua.compile("r1, r2, r3, r0, r4, rn, total = sum3(10, 20, 30)")
+	lua.run()
+
+	var r0 = lua.get_global("r0")
+	var r1 = lua.get_global("r1")
+	var r2 = lua.get_global("r2")
+	var r3 = lua.get_global("r3")
+	var r4 = lua.get_global("r4")
+	var rn = lua.get_global("rn")
+	var total = lua.get_global("total")
+
+	var cond = (
+		r0 == null and
+		r1 == 10 and
+		r2 == 20 and
+		r3 == 30 and
+		r4 == null and
+		rn == 3 and
+		total == 60 and
+		not lua.is_error()
+	)
+	var detail = "arg[0]=%s, arg[1]=%s, arg[2]=%s, arg[3]=%s, arg[4]=%s, arg.n=%s, total=%s, err=%s" % [
+		str(r0), str(r1), str(r2), str(r3), str(r4), str(rn), str(total), lua.get_error()
+	]
+	assert_test("Define Function arg[1], arg[2], arg[3] Access & 1-Based Table Indexing", cond, detail)

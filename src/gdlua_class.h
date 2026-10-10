@@ -4,6 +4,8 @@
 #include "godot_cpp/classes/wrapped.hpp"
 #include "godot_cpp/variant/variant.hpp"
 #include "godot_cpp/variant/dictionary.hpp"
+#include "godot_cpp/variant/packed_string_array.hpp"
+#include "godot_cpp/variant/array.hpp"
 
 extern "C" {
 #include "lua.h"
@@ -59,6 +61,8 @@ public:
 	bool step(int steps=1, bool line=false);
 	bool run();
 	bool abort();
+
+	bool define_function(const String &name, const String &code, const String &chunk_name = "");
 
 	int        get_current_line(int level = 0);
 	String     get_current_source(int level = 0);
